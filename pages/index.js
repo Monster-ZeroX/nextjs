@@ -1,65 +1,128 @@
-import Head from 'next/head'
-import styles from '../styles/Home.module.css'
+const config = {
+  basic: {
+    upstream: 'https://x265lk.com/',
+    mobileRedirect: 'https://x265lk.com/',
+  },
 
-export default function Home() {
-  return (
-    <div className={styles.container}>
-      <Head>
-        <title>Create Next App</title>
-        <link rel="icon" href="/favicon.ico" />
-      </Head>
+  firewall: {
+    blockedRegion: [],
+    blockedIPAddress: [],
+    scrapeShield: true,
+  },
 
-      <main className={styles.main}>
-        <h1 className={styles.title}>
-          Welcome to <a href="https://nextjs.org">Next.js!</a>
-        </h1>
+  routes: {},
 
-        <p className={styles.description}>
-          Get started by editing{' '}
-          <code className={styles.code}>pages/index.js</code>
-        </p>
+  optimization: {
+    cacheEverything: false,
+    cacheTtl: 5,
+    mirage: true,
+    polish: 'off',
+    minify: {
+      javascript: true,
+      css: true,
+      html: true,
+    },
+  },
+};
 
-        <div className={styles.grid}>
-          <a href="https://nextjs.org/docs" className={styles.card}>
-            <h3>Documentation &rarr;</h3>
-            <p>Find in-depth information about Next.js features and API.</p>
-          </a>
-
-          <a href="https://nextjs.org/learn" className={styles.card}>
-            <h3>Learn &rarr;</h3>
-            <p>Learn about Next.js in an interactive course with quizzes!</p>
-          </a>
-
-          <a
-            href="https://github.com/vercel/next.js/tree/master/examples"
-            className={styles.card}
-          >
-            <h3>Examples &rarr;</h3>
-            <p>Discover and deploy boilerplate example Next.js projects.</p>
-          </a>
-
-          <a
-            href="https://vercel.com/import?filter=next.js&utm_source=create-next-app&utm_medium=default-template&utm_campaign=create-next-app"
-            className={styles.card}
-          >
-            <h3>Deploy &rarr;</h3>
-            <p>
-              Instantly deploy your Next.js site to a public URL with Vercel.
-            </p>
-          </a>
-        </div>
-      </main>
-
-      <footer className={styles.footer}>
-        <a
-          href="https://vercel.com?utm_source=create-next-app&utm_medium=default-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Powered by{' '}
-          <img src="/vercel.svg" alt="Vercel Logo" className={styles.logo} />
-        </a>
-      </footer>
-    </div>
-  )
+async function isMobile(userAgent) {
+  const agents = ['Android', 'iPhone', 'SymbianOS', 'Windows Phone', 'iPad', 'iPod'];
+  return agents.any((agent) => userAgent.indexOf(agent) > 0);
 }
+
+async function fetchAndApply(request) {
+  const region = request.headers.get('cf-ipcountry') || '';
+  const ipAddress = request.headers.get('cf-connecting-ip') || '';
+  const userAgent = request.headers.get('user-agent') || '';
+
+  if (region !== '' && config.firewall.blockedRegion.includes(region.toUpperCase())) {
+    return new Response(
+      'Access denied: website is not available in your region.',
+      {
+        status: 403,
+      },
+    );
+  } if (ipAddress !== '' && config.firewall.blockedIPAddress.includes(ipAddress)) {
+    return new Response(
+      'Access denied: Your IP address is blocked.',
+      {
+        status: 403,
+      },
+    );
+  }
+
+  const requestURL = new URL(request.url);
+  let upstreamURL = null;
+
+  if (userAgent && isMobile(userAgent) === true) {
+    upstreamURL = new URL(config.basic.mobileRedirect);
+  } else if (region && region.toUpperCase() in config.routes) {
+    upstreamURL = new URL(config.routes[region.toUpperCase()]);
+  } else {
+    upstreamURL = new URL(config.basic.upstream);
+  }
+
+  requestURL.protocol = upstreamURL.protocol;
+  requestURL.host = upstreamURL.host;
+  requestURL.pathname = upstreamURL.pathname + requestURL.pathname;
+
+  let newRequest;
+  if (request.method === 'GET' || request.method === 'HEAD') {
+    newRequest = new Request(requestURL, {
+      cf: {
+        cacheEverything: config.optimization.cacheEverything,
+        cacheTtl: config.optimization.cacheTtl,
+        mirage: config.optimization.mirage,
+        polish: config.optimization.polish,
+        minify: config.optimization.minify,
+        scrapeShield: config.firewall.scrapeShield,
+      },
+      method: request.method,
+      headers: request.headers,
+    });
+  } else {
+    const requestBody = await request.text();
+    newRequest = new Request(requestURL, {
+      cf: {
+        cacheEverything: config.optimization.cacheEverything,
+        cacheTtl: config.optimization.cacheTtl,
+        mirage: config.optimization.mirage,
+        polish: config.optimization.polish,
+        minify: config.optimization.minify,
+        scrapeShield: config.firewall.scrapeShield,
+      },
+      method: request.method,
+      headers: request.headers,
+      body: requestBody,
+    });
+  }
+
+  const fetchedResponse = await fetch(newRequest);
+
+  const modifiedResponseHeaders = new Headers(fetchedResponse.headers);
+  if (modifiedResponseHeaders.has('x-pjax-url')) {
+    const pjaxURL = new URL(modifiedResponseHeaders.get('x-pjax-url'));
+    pjaxURL.protocol = requestURL.protocol;
+    pjaxURL.host = requestURL.host;
+    pjaxURL.pathname = pjaxURL.path.replace(requestURL.pathname, '/');
+
+    modifiedResponseHeaders.set(
+      'x-pjax-url',
+      pjaxURL.href,
+    );
+  }
+
+  return new Response(
+    fetchedResponse.body,
+    {
+      headers: modifiedResponseHeaders,
+      status: fetchedResponse.status,
+      statusText: fetchedResponse.statusText,
+    },
+  );
+}
+
+// eslint-disable-next-line no-restricted-globals
+addEventListener('fetch', (event) => {
+  event.respondWith(fetchAndApply(event.request));
+});
